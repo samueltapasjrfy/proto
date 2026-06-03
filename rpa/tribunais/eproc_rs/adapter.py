@@ -96,6 +96,35 @@ class EprocRSAdapter(EprocMGAdapter):
             pass
         return super()._apos_2fa_ok()
 
+    def _aguardar_pos_submit(self, timeout_s: int):
+        """No Keycloak (RS/SP), há telas intermediárias entre login e painel
+        em que `#otp` já está no DOM mas escondido. A guarda do MG que exige
+        `SEL_2FA_CODIGO count==0` derruba esse caso. Aqui aceitamos a
+        heurística baseada só em URL + ausência de `#username`.
+        """
+        import time as _t
+        assert self.page is not None
+        inicio = _t.time()
+        fim = inicio + timeout_s
+        delay_heuristica = 3.0
+        while _t.time() < fim:
+            if self._campo_2fa_visivel():
+                return "2fa"
+            if self._painel_carregado():
+                return "painel"
+            try:
+                if (
+                    _t.time() - inicio > delay_heuristica
+                    and self.page.locator(self.SEL_USUARIO).count() == 0
+                    and "login" not in self.page.url.lower()
+                    and "eproc" in self.page.url.lower()
+                ):
+                    return "painel"
+            except Exception:
+                pass
+            self.page.wait_for_timeout(250)
+        return None
+
     def _finalizar_login(self) -> None:
         """Se caímos na 'Seleção de perfil', escolhe o perfil da UF do tribunal
         atual (regex configurável via `RPA_EPROC_{UF}_PERFIL_REGEX` onde UF é
