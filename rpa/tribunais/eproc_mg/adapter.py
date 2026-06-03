@@ -103,20 +103,21 @@ class EprocMGAdapter(BaseAdapter):
     def _aguardar_pos_submit(self, timeout_s: int) -> str | None:
         """Retorna '2fa', 'painel' ou None."""
         assert self.page is not None
-        fim = time.time() + timeout_s
+        inicio = time.time()
+        fim = inicio + timeout_s
+        # Tempo mínimo antes da heurística disparar — protege contra a janela
+        # de redirect onde `#txtUsuario` já sumiu mas `#txtAcessoCodigo`
+        # ainda não montou (visto em RJ). 3s cobre o caso na prática.
+        delay_heuristica = 3.0
         while time.time() < fim:
             if self._campo_2fa_visivel():
                 return "2fa"
             if self._painel_carregado():
                 return "painel"
-            # Heurística "saiu da tela de login → painel" — só dispara depois
-            # que tivermos esperado o suficiente pro 2FA aparecer (se for o
-            # caso). Em RJ, há um redirect intermediário em que `#txtUsuario`
-            # sumiu mas `#txtAcessoCodigo` ainda não montou; sem essa guarda
-            # a heurística marcava login OK e seguia sem 2FA.
             try:
                 if (
-                    self.page.locator(self.SEL_USUARIO).count() == 0
+                    time.time() - inicio > delay_heuristica
+                    and self.page.locator(self.SEL_USUARIO).count() == 0
                     and self.page.locator(self.SEL_2FA_CODIGO).count() == 0
                     and "login" not in self.page.url.lower()
                     and "eproc" in self.page.url.lower()
