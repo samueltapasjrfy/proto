@@ -559,37 +559,34 @@ def cmd_processar(args: argparse.Namespace) -> int:
     sucessos: list[tuple[int, str, Path | None]] = []
     falhas: list[tuple[int, str]] = []
 
-    for tribunal_id, itens in por_tribunal.items():
-        adapter_cls = ADAPTERS.get(tribunal_id)
-        if adapter_cls is None:
-            log.error("tribunal %r sem adapter registrado", tribunal_id)
-            falhas.extend((it["cod_item"], f"sem adapter para {tribunal_id}") for it in itens)
-            continue
-
-        log.info("-" * 64)
-        log.info("Tribunal: %s — %d item(ns) — %s",
-                 tribunal_id, len(itens), adapter_cls.LOGIN_URL)
-        log.info("-" * 64)
-        try:
-            cliente_store = EnvClienteStore.from_env(tribunal_id)
-        except RuntimeError as e:
-            log.error("credenciais do tribunal %s ausentes: %s", tribunal_id, e)
-            falhas.extend((it["cod_item"], f"credenciais ausentes {tribunal_id}") for it in itens)
-            continue
-        cliente = cliente_store.get(ENV_CLIENTE_ID)
-
-        # Modo sync (workers=1): comportamento original, browser único compartilhado.
-        # Modo async (workers>=2): login sync → captura cookies → workers async paralelos.
-        if args.workers <= 1:
-            _processar_grupo_sync(
-                adapter_cls, cliente, cliente_store, cookie_store,
-                settings, args, log, itens, sucessos, falhas,
-            )
-        else:
-            _processar_grupo_async(
-                adapter_cls, cliente, cliente_store, cookie_store,
-                settings, args, log, tribunal_id, itens, sucessos, falhas,
-            )
+    if args.parallel_tribunais and len(por_tribunal) > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        log.info("paralelizando %d tribunal(is) em processos separados",
+                 len(por_tribunal))
+        # `vars(args)` é pickle-safe (só primitivos do argparse).
+        args_dict = vars(args)
+        with ProcessPoolExecutor(max_workers=len(por_tribunal)) as exe:
+            futures = {
+                exe.submit(_executar_grupo_em_processo, tid, itens, args_dict): tid
+                for tid, itens in por_tribunal.items()
+            }
+            for fut in as_completed(futures):
+                tid = futures[fut]
+                try:
+                    s, f = fut.result()
+                    sucessos.extend(s)
+                    falhas.extend(f)
+                except Exception as e:
+                    log.exception("processo do tribunal %s falhou: %s", tid, e)
+                    falhas.extend(
+                        (it["cod_item"], f"processo do tribunal {tid} falhou: {e}")
+                        for it in por_tribunal[tid]
+                    )
+    else:
+        for tribunal_id, itens in por_tribunal.items():
+            s, f = _executar_grupo(tribunal_id, itens, args, settings, cookie_store, log)
+            sucessos.extend(s)
+            falhas.extend(f)
 
     # ---- Fase 3: subir recibo no painel Jurify + concluir item ----
     finalizados: list[tuple[int, dict]] = []
@@ -634,6 +631,61 @@ def cmd_processar(args: argparse.Namespace) -> int:
     _imprimir_resumo_processar(bloqueados, sucessos, falhas, finalizados, falhas_finalizacao)
     erro_geral = bool(bloqueados or falhas or falhas_finalizacao)
     return 0 if not erro_geral else 3
+
+
+def _executar_grupo(
+    tribunal_id: str, itens: list[dict], args, settings, cookie_store, log,
+) -> tuple[list, list]:
+    """Roda a Fase 2 de um único tribunal — usado tanto no caminho serial
+    quanto dentro de subprocessos paralelos. Retorna (sucessos, falhas)
+    em vez de mutar listas in-place pra ser amigável a `ProcessPoolExecutor`.
+    """
+    sucessos: list = []
+    falhas: list = []
+
+    adapter_cls = ADAPTERS.get(tribunal_id)
+    if adapter_cls is None:
+        log.error("tribunal %r sem adapter registrado", tribunal_id)
+        falhas.extend((it["cod_item"], f"sem adapter para {tribunal_id}") for it in itens)
+        return sucessos, falhas
+
+    log.info("-" * 64)
+    log.info("Tribunal: %s — %d item(ns) — %s",
+             tribunal_id, len(itens), adapter_cls.LOGIN_URL)
+    log.info("-" * 64)
+    try:
+        cliente_store = EnvClienteStore.from_env(tribunal_id)
+    except RuntimeError as e:
+        log.error("credenciais do tribunal %s ausentes: %s", tribunal_id, e)
+        falhas.extend((it["cod_item"], f"credenciais ausentes {tribunal_id}") for it in itens)
+        return sucessos, falhas
+    cliente = cliente_store.get(ENV_CLIENTE_ID)
+
+    if args.workers <= 1:
+        _processar_grupo_sync(
+            adapter_cls, cliente, cliente_store, cookie_store,
+            settings, args, log, itens, sucessos, falhas,
+        )
+    else:
+        _processar_grupo_async(
+            adapter_cls, cliente, cliente_store, cookie_store,
+            settings, args, log, tribunal_id, itens, sucessos, falhas,
+        )
+    return sucessos, falhas
+
+
+def _executar_grupo_em_processo(
+    tribunal_id: str, itens: list[dict], args_dict: dict,
+) -> tuple[list, list]:
+    """Entry-point pickle-safe pra `ProcessPoolExecutor.submit`. Reconstrói
+    settings/logger/cookie_store dentro do subprocesso (não dá pra serializar
+    handles abertos) e delega pra `_executar_grupo`.
+    """
+    import argparse as _ap
+    settings, cookie_store = _bootstrap_base()
+    args = _ap.Namespace(**args_dict)
+    log = get_logger(f"cli.{tribunal_id}")
+    return _executar_grupo(tribunal_id, itens, args, settings, cookie_store, log)
 
 
 def _processar_grupo_sync(
@@ -1297,6 +1349,14 @@ def main(argv: list[str] | None = None) -> int:
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=None,
+    )
+    p_proc.add_argument(
+        "--parallel-tribunais",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="executa os tribunais em processos paralelos (cada tribunal num "
+             "Python independente). Reduz tempo total quando há vários tribunais "
+             "no batch. Custo: mais memória (1 Playwright por processo).",
     )
     p_proc.set_defaults(func=cmd_processar)
 
