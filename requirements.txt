@@ -1,0 +1,12 @@
+playwright>=1.46
+pyotp>=2.9
+python-dotenv>=1.0
+cryptography>=42.0
+pypdf>=4.0
+Pillow>=10.0
+PyMySQL>=1.1
+boto3>=1.34
+# OCR fallback para PDFs escaneados (precisa do binário `tesseract` no PATH e do
+# pacote `por` em `/opt/homebrew/share/tessdata/por.traineddata`).
+pypdfium2>=4.30
+pytesseract>=0.3
