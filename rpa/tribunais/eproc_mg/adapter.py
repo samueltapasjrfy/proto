@@ -109,10 +109,15 @@ class EprocMGAdapter(BaseAdapter):
                 return "2fa"
             if self._painel_carregado():
                 return "painel"
-            # heurística: saiu da tela de login
+            # Heurística "saiu da tela de login → painel" — só dispara depois
+            # que tivermos esperado o suficiente pro 2FA aparecer (se for o
+            # caso). Em RJ, há um redirect intermediário em que `#txtUsuario`
+            # sumiu mas `#txtAcessoCodigo` ainda não montou; sem essa guarda
+            # a heurística marcava login OK e seguia sem 2FA.
             try:
                 if (
                     self.page.locator(self.SEL_USUARIO).count() == 0
+                    and self.page.locator(self.SEL_2FA_CODIGO).count() == 0
                     and "login" not in self.page.url.lower()
                     and "eproc" in self.page.url.lower()
                 ):

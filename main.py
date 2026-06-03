@@ -680,9 +680,15 @@ def _executar_grupo_em_processo(
     """Entry-point pickle-safe pra `ProcessPoolExecutor.submit`. Reconstrói
     settings/logger/cookie_store dentro do subprocesso (não dá pra serializar
     handles abertos) e delega pra `_executar_grupo`.
+
+    Usa logger com suffix=tribunal_id pra que cada subprocesso escreva no
+    seu próprio `rpa-{tribunal}.log`, evitando que rotações concorrentes
+    sobrescrevam mensagens de outros tribunais.
     """
     import argparse as _ap
-    settings, cookie_store = _bootstrap_base()
+    settings = Settings.load()
+    setup_logger(settings.logs_dir, suffix=tribunal_id)
+    cookie_store = CookieStore(settings.cookies_dir)
     args = _ap.Namespace(**args_dict)
     log = get_logger(f"cli.{tribunal_id}")
     return _executar_grupo(tribunal_id, itens, args, settings, cookie_store, log)

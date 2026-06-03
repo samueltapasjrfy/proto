@@ -9,7 +9,14 @@ from pathlib import Path
 _CONFIGURED = False
 
 
-def setup(logs_dir: Path, level: int = logging.INFO) -> None:
+def setup(logs_dir: Path, level: int = logging.INFO, suffix: str | None = None) -> None:
+    """Configura logger root da app.
+
+    `suffix` quando setado é usado pro nome do arquivo (rpa-{suffix}.log /
+    errors-{suffix}.log) — essencial em subprocessos paralelos, senão dois
+    `RotatingFileHandler` apontando pro mesmo arquivo brigam pela rotação
+    e perdem mensagens.
+    """
     global _CONFIGURED
     if _CONFIGURED:
         return
@@ -29,12 +36,19 @@ def setup(logs_dir: Path, level: int = logging.INFO) -> None:
     stdout.setFormatter(fmt)
     root.addHandler(stdout)
 
-    full = RotatingFileHandler(logs_dir / "rpa.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    tag = f"-{suffix}" if suffix else ""
+    full = RotatingFileHandler(
+        logs_dir / f"rpa{tag}.log",
+        maxBytes=2_000_000, backupCount=3, encoding="utf-8",
+    )
     full.setLevel(logging.DEBUG)
     full.setFormatter(fmt)
     root.addHandler(full)
 
-    errors = RotatingFileHandler(logs_dir / "errors.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    errors = RotatingFileHandler(
+        logs_dir / f"errors{tag}.log",
+        maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+    )
     errors.setLevel(logging.ERROR)
     errors.setFormatter(fmt)
     root.addHandler(errors)
