@@ -10,3 +10,5 @@ boto3>=1.34
 # pacote `por` em `/opt/homebrew/share/tessdata/por.traineddata`).
 pypdfium2>=4.30
 pytesseract>=0.3
+# HTTP client (usado pelo consultar_migracao_mg.py — caminho rápido sem captcha).
+requests>=2.31

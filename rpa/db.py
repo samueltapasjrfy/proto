@@ -244,6 +244,61 @@ def marcar_como_erro(cod_item: int) -> int:
     return _set_cod_status_checkin(cod_item, COD_STATUS_CHECKIN_ERRO)
 
 
+# Versão da query SP SEM os filtros de migração (sem LIKE '4%' e sem ano >= 2025).
+# Usada pelo script de descoberta — mesmo padrão da `_QUERY_CANDIDATOS_MG_MIGRACAO`.
+_QUERY_CANDIDATOS_SP_MIGRACAO = """
+SELECT
+    t.CodItem,
+    t.IdProc,
+    t2.NumProcesso,
+    t2.NumProcessoCNJ
+FROM tbitens t
+LEFT JOIN tbprocessos t2 ON t.IdProc = t2.IdProc
+WHERE t.CodStatusCheckin IN (1, 10)
+  AND t.DtConclusao IS NULL
+  AND t.CodTipoItem = 5
+  AND t.CodTipoSubItem = 65
+  AND t.DtCadastro >= %s
+  AND t2.NumProcessoCNJ REGEXP '826[0-9]{4}$'
+  AND EXISTS (
+      SELECT 1 FROM tbarquivosprocesso ap WHERE ap.CodItem = t.CodItem
+  )
+ORDER BY t.DtCadastro ASC
+"""
+
+
+def listar_candidatos_sp_migracao(
+    *,
+    dt_cadastro_minimo: str = "2026-01-01",
+    dt_cadastro_maximo: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Candidatos SP pra checagem de migração — mesmas regras de status/documentos
+    que `listar_protocolos_aptos`, mas sem os filtros 'CNJ começa com 4' e
+    'ano >= 2025'. Serve pra descobrir processos que podem estar no eproc-SP
+    mesmo fora dos critérios óbvios de migração.
+
+    `dt_cadastro_maximo` opcional limita o teto da janela (default: sem teto).
+    """
+    base = _QUERY_CANDIDATOS_SP_MIGRACAO
+    if dt_cadastro_maximo is not None:
+        sql = base.replace(
+            "ORDER BY t.DtCadastro ASC",
+            "AND t.DtCadastro <= %s\nORDER BY t.DtCadastro ASC",
+        )
+        params: list[Any] = [dt_cadastro_minimo, dt_cadastro_maximo]
+    else:
+        sql = base
+        params = [dt_cadastro_minimo]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    with conexao() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
 _QUERY_ITEM_PARA_PROTOCOLO = """
 SELECT
     t.CodItem,
