@@ -125,6 +125,7 @@ WHERE t2.CodItem = %s
 def listar_protocolos_aptos(
     *,
     dt_cadastro_minimo: str = "2026-01-01",
+    dt_cadastro_maximo: str | None = None,
     cod_item: int | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -132,10 +133,14 @@ def listar_protocolos_aptos(
     petição (CodTipoItem=5 / CodTipoSubItem=65), com CNJ terminando em
     '813XXXX' (filtra processos MG), cadastrados a partir de `dt_cadastro_minimo`.
 
+    `dt_cadastro_maximo` opcional limita o teto da janela (default: sem teto).
     `cod_item` é um filtro opcional pra apontar um item específico (útil em testes).
     """
     sql = _QUERY_APTOS
     params: list[Any] = [dt_cadastro_minimo]
+    if dt_cadastro_maximo is not None:
+        sql += " AND t.DtCadastro <= %s"
+        params.append(dt_cadastro_maximo)
     if cod_item is not None:
         sql += " AND t.CodItem = %s"
         params.append(cod_item)
@@ -149,6 +154,63 @@ def listar_protocolos_aptos(
             cur.execute(sql, params)
             rows = cur.fetchall()
     return [dict(r) for r in rows]
+
+
+# Versão da query MG SEM os filtros de migração (sem LIKE '1%' e sem ano >= 2025).
+# Usada pelo script de descoberta — varre todos os MG aptos por status/documento
+# pra ver quais já estão migrados no eproc, mesmo os que ficariam fora do filtro normal.
+_QUERY_CANDIDATOS_MG_MIGRACAO = """
+SELECT
+    t.CodItem,
+    t.IdProc,
+    t2.NumProcesso,
+    t2.NumProcessoCNJ
+FROM tbitens t
+LEFT JOIN tbprocessos t2 ON t.IdProc = t2.IdProc
+WHERE t.CodStatusCheckin IN (1, 10)
+  AND t.DtConclusao IS NULL
+  AND t.CodTipoItem = 5
+  AND t.CodTipoSubItem = 65
+  AND t.DtCadastro >= %s
+  AND t2.NumProcessoCNJ REGEXP '813[0-9]{4}$'
+  AND EXISTS (
+      SELECT 1 FROM tbarquivosprocesso ap WHERE ap.CodItem = t.CodItem
+  )
+ORDER BY t.DtCadastro ASC
+"""
+
+
+def listar_candidatos_mg_migracao(
+    *,
+    dt_cadastro_minimo: str = "2026-01-01",
+    dt_cadastro_maximo: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Candidatos MG pra checagem de migração — mesmas regras de status/documentos
+    que `listar_protocolos_aptos`, mas sem os filtros 'CNJ começa com 1' e
+    'ano >= 2025'. Serve pra descobrir processos que podem estar no eproc-MG
+    mesmo fora dos critérios óbvios de migração.
+
+    `dt_cadastro_maximo` opcional limita o teto da janela (default: sem teto).
+    """
+    base = _QUERY_CANDIDATOS_MG_MIGRACAO
+    # injeta o filtro maximo antes do ORDER BY
+    if dt_cadastro_maximo is not None:
+        sql = base.replace(
+            "ORDER BY t.DtCadastro ASC",
+            "AND t.DtCadastro <= %s\nORDER BY t.DtCadastro ASC",
+        )
+        params: list[Any] = [dt_cadastro_minimo, dt_cadastro_maximo]
+    else:
+        sql = base
+        params = [dt_cadastro_minimo]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    with conexao() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
 
 
 def listar_arquivos_do_item(cod_item: int) -> list[dict[str, Any]]:
@@ -180,6 +242,47 @@ def marcar_em_execucao(cod_item: int) -> int:
 def marcar_como_erro(cod_item: int) -> int:
     """Devolve o item pro pool (status 10) — próxima rodada do robô vai pegar de novo."""
     return _set_cod_status_checkin(cod_item, COD_STATUS_CHECKIN_ERRO)
+
+
+_QUERY_ITEM_PARA_PROTOCOLO = """
+SELECT
+    t.CodItem,
+    t.IdProc,
+    t2.NumProcesso,
+    t2.NumProcessoCNJ,
+    CASE
+        WHEN t2.NumProcessoCNJ REGEXP '813[0-9]{4}$' THEN 'https://eproc1g.tjmg.jus.br/eproc/'
+        WHEN t2.NumProcessoCNJ REGEXP '821[0-9]{4}$' THEN 'https://eproc1g.tjrs.jus.br/eproc/'
+        WHEN t2.NumProcessoCNJ REGEXP '826[0-9]{4}$' THEN 'https://eproc1g.tjsp.jus.br/eproc/'
+        WHEN t2.NumProcessoCNJ REGEXP '819[0-9]{4}$' THEN 'https://eproc1g.tjrj.jus.br/eproc/'
+    END AS eproc_base
+FROM tbitens t
+LEFT JOIN tbprocessos t2 ON t.IdProc = t2.IdProc
+WHERE t.CodItem = %s
+  AND t.CodStatusCheckin IN (1, 10)
+  AND t.DtConclusao IS NULL
+  AND t.CodTipoItem = 5
+  AND t.CodTipoSubItem = 65
+  AND EXISTS (
+      SELECT 1 FROM tbarquivosprocesso ap WHERE ap.CodItem = t.CodItem
+  )
+"""
+
+
+def buscar_item_para_protocolo(cod_item: int) -> dict[str, Any] | None:
+    """Versão sem filtros de migração — pra protocolizar itens descobertos
+    externamente (ex.: pelo script de migração) que não passariam pelo
+    `listar_protocolos_aptos` mas confirmadamente existem no eproc.
+
+    Mantém os checks essenciais: status 1/10, não concluído, tipo petição,
+    tem arquivos. Retorna o mesmo shape de `listar_protocolos_aptos[0]`,
+    com `eproc_base`, pra ser plugável em `_preparar_item`.
+    """
+    with conexao() as conn:
+        with conn.cursor() as cur:
+            cur.execute(_QUERY_ITEM_PARA_PROTOCOLO, [int(cod_item)])
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def buscar_processo_por_cod_item(cod_item: int) -> dict[str, Any] | None:

@@ -19,6 +19,7 @@ env/
 data/clientes.json
 data/cookies/
 data/logs/
+data/migracao_*.json
 
 # Pastas de processo (CNJ 20 dígitos) — contém PDFs reais baixados do S3
 /[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]/

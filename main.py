@@ -24,6 +24,7 @@ from rpa.config import Settings
 from rpa.crypto import Cipher
 from rpa.db import (
     DBConfigError,
+    buscar_item_para_protocolo,
     buscar_processo_por_cod_item,
     listar_arquivos_do_item,
     listar_protocolos_aptos,
@@ -71,6 +72,11 @@ EPROC_BASE_TO_TRIBUNAL = {
 def _default_desde(dias: int = 7) -> str:
     """Default da janela: últimos N dias (não mais que isso, pra não puxar lixo)."""
     return (date.today() - timedelta(days=dias)).isoformat()
+
+
+def _hoje() -> str:
+    """Teto da janela: data de hoje (não puxa lixo cadastrado com data futura)."""
+    return date.today().isoformat()
 
 
 def _bootstrap_base() -> tuple[Settings, CookieStore]:
@@ -356,11 +362,24 @@ def _preparar_item(cod_item: int, args, log) -> dict | None:
     Retorna dict com chaves cod_item/cnj_digits/principal/anexos quando o item
     está pronto pro browser. Retorna None se algum gate falhar (e loga o motivo).
     """
-    itens = listar_protocolos_aptos(cod_item=cod_item, dt_cadastro_minimo=args.desde)
-    if not itens:
-        log.error("CodItem=%s: não está entre os aptos (fora dos filtros da query)", cod_item)
-        return None
-    item = itens[0]
+    if getattr(args, "ignorar_filtro_migracao", False):
+        item = buscar_item_para_protocolo(cod_item)
+        if not item:
+            log.error(
+                "CodItem=%s: não passou nos checks essenciais (status, tipo, arquivos)",
+                cod_item,
+            )
+            return None
+    else:
+        itens = listar_protocolos_aptos(
+            cod_item=cod_item,
+            dt_cadastro_minimo=args.desde,
+            dt_cadastro_maximo=_hoje(),
+        )
+        if not itens:
+            log.error("CodItem=%s: não está entre os aptos (fora dos filtros da query)", cod_item)
+            return None
+        item = itens[0]
     cnj_digits = re.sub(r"\D", "", str(item.get("NumProcessoCNJ") or ""))
     if not cnj_digits:
         log.error("CodItem=%s: sem NumProcessoCNJ", cod_item)
@@ -1048,6 +1067,7 @@ def cmd_baixar_aptos(args: argparse.Namespace) -> int:
     try:
         itens = listar_protocolos_aptos(
             dt_cadastro_minimo=args.desde,
+            dt_cadastro_maximo=_hoje(),
             cod_item=args.cod_item,
             limit=args.limit,
         )
@@ -1128,6 +1148,7 @@ def cmd_listar_aptos(args: argparse.Namespace) -> int:
     try:
         itens = listar_protocolos_aptos(
             dt_cadastro_minimo=args.desde,
+            dt_cadastro_maximo=_hoje(),
             cod_item=args.cod_item,
             limit=args.limit,
         )
@@ -1363,6 +1384,14 @@ def main(argv: list[str] | None = None) -> int:
         help="executa os tribunais em processos paralelos (cada tribunal num "
              "Python independente). Reduz tempo total quando há vários tribunais "
              "no batch. Custo: mais memória (1 Playwright por processo).",
+    )
+    p_proc.add_argument(
+        "--ignorar-filtro-migracao",
+        action="store_true",
+        help="pula o filtro 'já migrou pro eproc' (regex de início do CNJ + ano "
+             "de cadastro) do listar_protocolos_aptos. Pra usar com CodItems "
+             "confirmados via script de descoberta (ex.: consultar_migracao_mg.py). "
+             "Mantém todos os outros checks (status, tipo, arquivos).",
     )
     p_proc.set_defaults(func=cmd_processar)
 
