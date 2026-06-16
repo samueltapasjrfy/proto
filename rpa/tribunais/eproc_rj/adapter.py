@@ -10,8 +10,14 @@ Híbrido entre MG e RS/SP:
 
 Pra evitar duplicação, herdamos de `EprocRSAdapter` e sobrescrevemos os
 seletores Keycloak voltando-os pros do MG/SIP do próprio eproc.
+
+Modo stealth (env `RPA_RJ_STEALTH=1`): usa `patchright` em vez de `playwright`
+puro pra evitar detecção do Cloudflare Turnstile, que o TJRJ adicionou no
+login em 2026. `patchright` corrige CDP leaks que delatam automação.
 """
 from __future__ import annotations
+
+import os
 
 from ..eproc_mg.adapter import EprocMGAdapter
 from ..eproc_rs.adapter import EprocRSAdapter
@@ -30,3 +36,59 @@ class EprocRJAdapter(EprocRSAdapter):
 
     # Sigla RJ (ex.: RJ123456A). Configurável via `RPA_EPROC_RJ_PERFIL_REGEX`.
     PERFIL_REGEX_DEFAULT = r"^RJ\w+"
+
+    def start(self) -> None:
+        # `patchright` é drop-in do playwright que esconde sinais de automação
+        # (navigator.webdriver, CDP enable leaks, etc.) que o Cloudflare usa
+        # pra detectar bots. Ativa só quando RPA_RJ_STEALTH=1 (default mantém
+        # comportamento original).
+        if os.getenv("RPA_RJ_STEALTH") == "1":
+            from patchright.sync_api import sync_playwright as _stealth_sync
+            self.log.debug("iniciando patchright stealth (headless=%s)", self.headless)
+            self._playwright = _stealth_sync().start()
+            self._browser = self._playwright.chromium.launch(headless=self.headless)
+            self.context = self._browser.new_context()
+            self.page = self.context.new_page()
+        else:
+            super().start()
+
+        # Captura dialogs (alert/confirm/prompt) — eproc-RJ usa pop-ups JS pra
+        # mensagens de Cloudflare/manutenção/erro; sem listener, page.goto trava
+        # esperando o user fechar.
+        def _on_dialog(dialog):
+            try:
+                self.log.warning(
+                    "DIALOG %s capturado: %r — aceitando",
+                    dialog.type, dialog.message,
+                )
+                dialog.accept()
+            except Exception as e:
+                self.log.warning("falha tratando dialog: %s", e)
+        self.page.on("dialog", _on_dialog)
+
+    def login(self):
+        try:
+            return super().login()
+        except Exception as e:
+            # No timeout pós-submit, salva screenshot + dump do estado da tela
+            # pra investigar Cloudflare/modal/alert no eproc-RJ.
+            try:
+                import time as _t
+                shot = self.settings.logs_dir / f"rj_login_fail_{int(_t.time())}.png"
+                self.page.screenshot(path=str(shot), full_page=True)
+                self.log.warning("screenshot do login fail salvo em %s", shot)
+                info = self.page.evaluate("""() => {
+                    const turnstile = !!document.querySelector('.cf-turnstile') || /Verify you are human/i.test(document.body?.innerText || '');
+                    const alerts = Array.from(document.querySelectorAll('[role="alert"], .alert, .modal, .swal2-popup, .infraMensagem')).map(e => (e.innerText || '').substring(0,200));
+                    return {
+                        url: window.location.href,
+                        title: document.title,
+                        turnstile_visivel: turnstile,
+                        alert_texts: alerts.slice(0, 5),
+                        body_head: (document.body?.innerText || '').substring(0, 500),
+                    };
+                }""")
+                self.log.warning("estado da tela: %r", info)
+            except Exception as e2:
+                self.log.warning("falha capturando estado: %s", e2)
+            raise

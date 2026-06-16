@@ -1,7 +1,7 @@
-"""Descoberta de processos MG migrados pro eproc.
+"""Descoberta de processos RJ migrados pro eproc.
 
-Pega os candidatos MG que passam nos filtros normais de status/documento
-mas estão fora do filtro "óbvio" de migração (CNJ começa com 1 e ano >= 2025),
+Pega os candidatos RJ que passam nos filtros normais de status/documento
+mas estão fora do filtro "óbvio" de migração (CNJ começa com 3 e ano >= 2025),
 consulta cada um no eproc-MG e salva o resultado num JSON local.
 
 Estratégia:
@@ -9,12 +9,12 @@ Estratégia:
 - Loop de consultas via `requests` HTTP direto no endpoint AJAX
   (`processos_consulta_por_numprocesso`), ~10x mais rápido que navegar
   pelo browser. Resposta XML = não encontrado; JSON = encontrado.
-- Salva tudo em `data/migracao_mg.json` (cumulativo, idempotente).
+- Salva tudo em `data/migracao_rj.json` (cumulativo, idempotente).
 
 Uso:
-    python consultar_migracao_mg.py
-    python consultar_migracao_mg.py --desde 2025-01-01 --limit 50
-    python consultar_migracao_mg.py --skip-ja-consultados
+    python consultar_migracao_rj.py
+    python consultar_migracao_rj.py --desde 2025-01-01 --limit 50
+    python consultar_migracao_rj.py --skip-ja-consultados
 """
 from __future__ import annotations
 
@@ -29,16 +29,15 @@ from pathlib import Path
 import requests
 
 from rpa.config import Settings
-from rpa.db import listar_arquivos_do_item, listar_candidatos_mg_migracao
+from rpa.db import listar_arquivos_do_item, listar_candidatos_rj_migracao
 from rpa.logger import get as get_logger, setup as setup_logger
 from rpa.storage import ENV_CLIENTE_ID, CookieStore, EnvClienteStore
-from rpa.tribunais.eproc_mg import EprocMGAdapter
+from rpa.tribunais.eproc_rj import EprocRJAdapter
 
 
-DEFAULT_OUT = Path("data") / "migracao_mg.json"
-DEFAULT_OUT_APTOS = Path("data") / "migracao_mg_aptos.json"
-DEFAULT_OUT_BLACKLIST = Path("data") / "migracao_mg_blacklist.json"
-BASE = "https://eproc1g.tjmg.jus.br/eproc"
+DEFAULT_OUT = Path("data") / "migracao_rj.json"
+DEFAULT_OUT_APTOS = Path("data") / "migracao_rj_aptos.json"
+BASE = "https://eproc1g.tjrj.jus.br/eproc"
 
 
 def _default_desde(dias: int = 7) -> str:
@@ -65,7 +64,7 @@ def _salvar(path: Path, registros: dict[int, dict]) -> None:
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _preparar_sessao_http(adapter: EprocMGAdapter) -> tuple[requests.Session, str, str]:
+def _preparar_sessao_http(adapter: EprocRJAdapter) -> tuple[requests.Session, str, str]:
     """Após login, navega pra tela de consulta, captura hash do form e cookies,
     e devolve uma `requests.Session` pronta + (hash_form, referer).
     """
@@ -169,8 +168,8 @@ def _consultar_http(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="consultar-migracao-mg",
-        description="Consulta candidatos MG no eproc pra descobrir migrados (via HTTP).",
+        prog="consultar-migracao-rj",
+        description="Consulta candidatos RJ no eproc pra descobrir migrados (via HTTP).",
     )
     parser.add_argument(
         "--desde",
@@ -208,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings.load()
-    setup_logger(settings.logs_dir, suffix="consultar_migracao_mg")
+    setup_logger(settings.logs_dir, suffix="consultar_migracao_rj")
     log = get_logger("cli")
 
     out_path = Path(args.out).expanduser()
@@ -216,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("JSON inicial: %s — %d registro(s) existente(s)", out_path, len(registros))
 
     try:
-        candidatos = listar_candidatos_mg_migracao(
+        candidatos = listar_candidatos_rj_migracao(
             dt_cadastro_minimo=args.desde,
             dt_cadastro_maximo=_hoje(),
             limit=args.limit,
@@ -230,42 +229,41 @@ def main(argv: list[str] | None = None) -> int:
         candidatos = [c for c in candidatos if c["CodItem"] not in registros]
         log.info("--skip-ja-consultados: pulando %d já consultado(s)", pulados)
 
-    pular_consulta = not candidatos
-    if pular_consulta:
-        log.info("nenhum candidato a consultar — regenerando aptos e blacklist a partir do JSON")
+    if not candidatos:
+        log.info("nenhum candidato a consultar")
+        print("(nada a consultar)")
+        return 0
 
-    encontrados = nao_encontrados = erros = i = 0
+    log.info("=" * 64)
+    log.info("vai consultar %d processo(s) RJ via HTTP", len(candidatos))
+    log.info("=" * 64)
+
+    cliente_store = EnvClienteStore.from_env_eproc_mg()
+    cliente = cliente_store.get(ENV_CLIENTE_ID)
+    cookie_store = CookieStore(settings.cookies_dir)
+
+    # Login com playwright só pra capturar cookies + hash, depois fecha o browser.
+    log.info("login Playwright (1x) — capturando cookies + hash do form")
+    with EprocRJAdapter(
+        cliente,
+        settings=settings,
+        cliente_store=cliente_store,
+        cookie_store=cookie_store,
+        headless=args.headless,
+    ) as adapter:
+        try:
+            adapter.login()
+            session, hash_form, referer = _preparar_sessao_http(adapter)
+        except Exception as e:
+            log.exception("falha preparando sessão HTTP: %s", e)
+            return 2
+    log.info("sessão HTTP pronta — hash_form=%s, cookies=%d",
+             hash_form, len(session.cookies))
+
+    encontrados = 0
+    nao_encontrados = 0
+    erros = 0
     sessao_expirada = False
-
-    if pular_consulta:
-        cliente_store = None
-    else:
-        log.info("=" * 64)
-        log.info("vai consultar %d processo(s) MG via HTTP", len(candidatos))
-        log.info("=" * 64)
-        cliente_store = EnvClienteStore.from_env_eproc_mg()
-
-    if not pular_consulta:
-        cliente = cliente_store.get(ENV_CLIENTE_ID)
-        cookie_store = CookieStore(settings.cookies_dir)
-
-        # Login com playwright só pra capturar cookies + hash, depois fecha o browser.
-        log.info("login Playwright (1x) — capturando cookies + hash do form")
-        with EprocMGAdapter(
-            cliente,
-            settings=settings,
-            cliente_store=cliente_store,
-            cookie_store=cookie_store,
-            headless=args.headless,
-        ) as adapter:
-            try:
-                adapter.login()
-                session, hash_form, referer = _preparar_sessao_http(adapter)
-            except Exception as e:
-                log.exception("falha preparando sessão HTTP: %s", e)
-                return 2
-        log.info("sessão HTTP pronta — hash_form=%s, cookies=%d",
-                 hash_form, len(session.cookies))
 
     for i, cand in enumerate(candidatos, start=1):
         cod = cand["CodItem"]
@@ -348,32 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     aptos_path.write_text(json.dumps(aptos, ensure_ascii=False, indent=2), encoding="utf-8")
     stack = [r["cod_item"] for r in aptos]
 
-    # Blacklist: CodItems consultados que confirmadamente NÃO estão no eproc.
-    # `--skip-ja-consultados` já pula esses (porque estão no JSON cumulativo),
-    # mas exportar separado facilita auditoria e fica enxuto.
-    blacklist = sorted(
-        (
-            {
-                "cod_item": r["cod_item"],
-                "cnj": r.get("cnj"),
-                "consultado_em": r.get("consultado_em"),
-                "motivo": r.get("erro") or "não encontrado",
-            }
-            for r in registros.values()
-            if not r.get("encontrado") and r.get("erro")
-            and "não encontrado" in (r.get("erro") or "").lower()
-        ),
-        key=lambda r: r["cod_item"],
-    )
-    blacklist_path = DEFAULT_OUT_BLACKLIST
-    blacklist_path.parent.mkdir(parents=True, exist_ok=True)
-    blacklist_path.write_text(
-        json.dumps(blacklist, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
     print("\n" + "=" * 64)
-    print("RESUMO — consultar migração MG (HTTP)")
+    print("RESUMO — consultar migração RJ (HTTP)")
     print("=" * 64)
     print(f"consultados nesta rodada: {min(len(candidatos), i if 'i' in dir() else 0)}")
     print(f"  ✓ encontrados:     {encontrados}")
@@ -383,7 +357,6 @@ def main(argv: list[str] | None = None) -> int:
         print("  ⚠ sessão expirou no meio — rode de novo com --skip-ja-consultados")
     print(f"JSON cumulativo: {out_path}")
     print(f"JSON só aptos:   {aptos_path}")
-    print(f"JSON blacklist:  {blacklist_path} ({len(blacklist)} CodItem(s))")
     print(f"\naptos (encontrado + tem arquivos): {len(stack)} CodItem(s)")
     if stack:
         print(" ".join(str(c) for c in stack))
