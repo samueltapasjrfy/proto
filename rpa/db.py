@@ -139,7 +139,10 @@ def listar_protocolos_aptos(
     sql = _QUERY_APTOS
     params: list[Any] = [dt_cadastro_minimo]
     if dt_cadastro_maximo is not None:
-        sql += " AND t.DtCadastro <= %s"
+        # `< max + 1 dia` em vez de `<= max`: DtCadastro é DATETIME, então
+        # `<= '2026-06-16'` compara contra a meia-noite e descartaria tudo que
+        # foi cadastrado HOJE com hora > 00:00. Isso mantém o dia inteiro.
+        sql += " AND t.DtCadastro < DATE_ADD(%s, INTERVAL 1 DAY)"
         params.append(dt_cadastro_maximo)
     if cod_item is not None:
         sql += " AND t.CodItem = %s"
@@ -198,7 +201,8 @@ def listar_candidatos_mg_migracao(
     if dt_cadastro_maximo is not None:
         sql = base.replace(
             "ORDER BY t.DtCadastro ASC",
-            "AND t.DtCadastro <= %s\nORDER BY t.DtCadastro ASC",
+            # `< max + 1 dia`: inclui o dia inteiro (DtCadastro é DATETIME).
+            "AND t.DtCadastro < DATE_ADD(%s, INTERVAL 1 DAY)\nORDER BY t.DtCadastro ASC",
         )
         params: list[Any] = [dt_cadastro_minimo, dt_cadastro_maximo]
     else:
@@ -284,7 +288,62 @@ def listar_candidatos_sp_migracao(
     if dt_cadastro_maximo is not None:
         sql = base.replace(
             "ORDER BY t.DtCadastro ASC",
-            "AND t.DtCadastro <= %s\nORDER BY t.DtCadastro ASC",
+            # `< max + 1 dia`: inclui o dia inteiro (DtCadastro é DATETIME).
+            "AND t.DtCadastro < DATE_ADD(%s, INTERVAL 1 DAY)\nORDER BY t.DtCadastro ASC",
+        )
+        params: list[Any] = [dt_cadastro_minimo, dt_cadastro_maximo]
+    else:
+        sql = base
+        params = [dt_cadastro_minimo]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    with conexao() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+# Versão da query RJ SEM os filtros de migração (sem LIKE '3%' e sem ano >= 2025).
+# Mesmo padrão da `_QUERY_CANDIDATOS_MG_MIGRACAO`.
+_QUERY_CANDIDATOS_RJ_MIGRACAO = """
+SELECT
+    t.CodItem,
+    t.IdProc,
+    t2.NumProcesso,
+    t2.NumProcessoCNJ
+FROM tbitens t
+LEFT JOIN tbprocessos t2 ON t.IdProc = t2.IdProc
+WHERE t.CodStatusCheckin IN (1, 10)
+  AND t.DtConclusao IS NULL
+  AND t.CodTipoItem = 5
+  AND t.CodTipoSubItem = 65
+  AND t.DtCadastro >= %s
+  AND t2.NumProcessoCNJ REGEXP '819[0-9]{4}$'
+  AND EXISTS (
+      SELECT 1 FROM tbarquivosprocesso ap WHERE ap.CodItem = t.CodItem
+  )
+ORDER BY t.DtCadastro ASC
+"""
+
+
+def listar_candidatos_rj_migracao(
+    *,
+    dt_cadastro_minimo: str = "2026-01-01",
+    dt_cadastro_maximo: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Candidatos RJ pra checagem de migração — mesmas regras de status/documentos
+    que `listar_protocolos_aptos`, mas sem os filtros 'CNJ começa com 3' e
+    'ano >= 2025'. Serve pra descobrir processos que podem estar no eproc-RJ
+    mesmo fora dos critérios óbvios de migração.
+    """
+    base = _QUERY_CANDIDATOS_RJ_MIGRACAO
+    if dt_cadastro_maximo is not None:
+        sql = base.replace(
+            "ORDER BY t.DtCadastro ASC",
+            # `< max + 1 dia`: inclui o dia inteiro (DtCadastro é DATETIME).
+            "AND t.DtCadastro < DATE_ADD(%s, INTERVAL 1 DAY)\nORDER BY t.DtCadastro ASC",
         )
         params: list[Any] = [dt_cadastro_minimo, dt_cadastro_maximo]
     else:
