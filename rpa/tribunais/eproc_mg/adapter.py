@@ -132,7 +132,11 @@ class EprocMGAdapter(BaseAdapter):
 
         from ...captcha_audio import transcrever_codigo
 
-        base = self.LOGIN_URL.rstrip("/")
+        # Base do eproc pro endpoint do áudio. NÃO usar LOGIN_URL direto: no RJ
+        # ele tem path+query ('.../eproc/externo_controlador.php?acao=principal'),
+        # o que montaria uma URL quebrada. Extrai até '/eproc'.
+        m = re.match(r"(https?://[^/]+/eproc)", self.LOGIN_URL)
+        base = m.group(1) if m else self.LOGIN_URL.rstrip("/")
         for tentativa in range(1, self.CAPTCHA_MAX_TENTATIVAS + 1):
             try:
                 # dispara a geração do áudio e baixa o WAV (mesma sessão = mesmo código)

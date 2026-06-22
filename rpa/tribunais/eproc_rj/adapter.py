@@ -37,14 +37,19 @@ class EprocRJAdapter(EprocRSAdapter):
     # Sigla RJ (ex.: RJ123456A). Configurável via `RPA_EPROC_RJ_PERFIL_REGEX`.
     PERFIL_REGEX_DEFAULT = r"^RJ\w+"
 
+    # Login do RJ é instável: o Cloudflare/rate-limit às vezes rejeita um login
+    # válido com alert espúrio "Senha ou usuário Inválidos". Retry resolve.
+    LOGIN_MAX_TENTATIVAS = 4
+    LOGIN_RETRY_BACKOFF_S = 8.0
+
     def start(self) -> None:
         # `patchright` é drop-in do playwright que esconde sinais de automação
         # (navigator.webdriver, CDP enable leaks, etc.) que o Cloudflare usa
-        # pra detectar bots. Ativa só quando RPA_RJ_STEALTH=1 (default mantém
-        # comportamento original).
-        if os.getenv("RPA_RJ_STEALTH") == "1":
+        # pra detectar bots. Liga por DEFAULT no RJ (3/3 logins OK com stealth
+        # vs rejeição espúria sem) — desligue com RPA_RJ_STEALTH=0.
+        if os.getenv("RPA_RJ_STEALTH", "1") != "0":
             from patchright.sync_api import sync_playwright as _stealth_sync
-            self.log.debug("iniciando patchright stealth (headless=%s)", self.headless)
+            self.log.info("iniciando patchright stealth (headless=%s)", self.headless)
             self._playwright = _stealth_sync().start()
             self._browser = self._playwright.chromium.launch(headless=self.headless)
             self.context = self._browser.new_context()
@@ -67,28 +72,45 @@ class EprocRJAdapter(EprocRSAdapter):
         self.page.on("dialog", _on_dialog)
 
     def login(self):
-        try:
-            return super().login()
-        except Exception as e:
-            # No timeout pós-submit, salva screenshot + dump do estado da tela
-            # pra investigar Cloudflare/modal/alert no eproc-RJ.
+        # Retry-loop: o RJ rejeita logins válidos de forma intermitente (rate-limit
+        # / Cloudflare → alert "Senha ou usuário Inválidos" espúrio). Cada tentativa
+        # recarrega o form do zero (super().login() faz goto). Backoff entre elas
+        # dá cooldown pro rate-limit.
+        ultimo_erro: Exception | None = None
+        for tentativa in range(1, self.LOGIN_MAX_TENTATIVAS + 1):
             try:
-                import time as _t
-                shot = self.settings.logs_dir / f"rj_login_fail_{int(_t.time())}.png"
-                self.page.screenshot(path=str(shot), full_page=True)
-                self.log.warning("screenshot do login fail salvo em %s", shot)
-                info = self.page.evaluate("""() => {
-                    const turnstile = !!document.querySelector('.cf-turnstile') || /Verify you are human/i.test(document.body?.innerText || '');
-                    const alerts = Array.from(document.querySelectorAll('[role="alert"], .alert, .modal, .swal2-popup, .infraMensagem')).map(e => (e.innerText || '').substring(0,200));
-                    return {
-                        url: window.location.href,
-                        title: document.title,
-                        turnstile_visivel: turnstile,
-                        alert_texts: alerts.slice(0, 5),
-                        body_head: (document.body?.innerText || '').substring(0, 500),
-                    };
-                }""")
-                self.log.warning("estado da tela: %r", info)
-            except Exception as e2:
-                self.log.warning("falha capturando estado: %s", e2)
-            raise
+                return super().login()
+            except Exception as e:
+                ultimo_erro = e
+                self._dump_login_fail()
+                if tentativa < self.LOGIN_MAX_TENTATIVAS:
+                    espera = self.LOGIN_RETRY_BACKOFF_S * tentativa
+                    self.log.warning(
+                        "login RJ falhou (tentativa %d/%d): %s — retry em %.0fs",
+                        tentativa, self.LOGIN_MAX_TENTATIVAS, e, espera,
+                    )
+                    self.page.wait_for_timeout(int(espera * 1000))
+        assert ultimo_erro is not None
+        raise ultimo_erro
+
+    def _dump_login_fail(self) -> None:
+        """Screenshot + dump do estado da tela pra investigar Cloudflare/modal/alert."""
+        try:
+            import time as _t
+            shot = self.settings.logs_dir / f"rj_login_fail_{int(_t.time())}.png"
+            self.page.screenshot(path=str(shot), full_page=True)
+            self.log.warning("screenshot do login fail salvo em %s", shot)
+            info = self.page.evaluate("""() => {
+                const turnstile = !!document.querySelector('.cf-turnstile') || /Verify you are human/i.test(document.body?.innerText || '');
+                const alerts = Array.from(document.querySelectorAll('[role="alert"], .alert, .modal, .swal2-popup, .infraMensagem')).map(e => (e.innerText || '').substring(0,200));
+                return {
+                    url: window.location.href,
+                    title: document.title,
+                    turnstile_visivel: turnstile,
+                    alert_texts: alerts.slice(0, 5),
+                    body_head: (document.body?.innerText || '').substring(0, 500),
+                };
+            }""")
+            self.log.warning("estado da tela: %r", info)
+        except Exception as e2:
+            self.log.warning("falha capturando estado: %s", e2)

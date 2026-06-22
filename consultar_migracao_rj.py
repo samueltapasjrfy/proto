@@ -2,7 +2,7 @@
 
 Pega os candidatos RJ que passam nos filtros normais de status/documento
 mas estão fora do filtro "óbvio" de migração (CNJ começa com 3 e ano >= 2025),
-consulta cada um no eproc-MG e salva o resultado num JSON local.
+consulta cada um no eproc-RJ e salva o resultado num JSON local.
 
 Estratégia:
 - Login com Playwright UMA VEZ → captura cookies + hash do form de consulta.
@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("vai consultar %d processo(s) RJ via HTTP", len(candidatos))
     log.info("=" * 64)
 
-    cliente_store = EnvClienteStore.from_env_eproc_mg()
+    cliente_store = EnvClienteStore.from_env_eproc_rj()
     cliente = cliente_store.get(ENV_CLIENTE_ID)
     cookie_store = CookieStore(settings.cookies_dir)
 
