@@ -12,3 +12,6 @@ pypdfium2>=4.30
 pytesseract>=0.3
 # HTTP client (usado pelo consultar_migracao_mg.py — caminho rápido sem captcha).
 requests>=2.31
+# STT pro áudio-captcha do login eproc-MG (jun/2026). Precisa de ffmpeg no PATH.
+# Modelo configurável via RPA_WHISPER_MODEL (default 'small').
+faster-whisper>=1.0

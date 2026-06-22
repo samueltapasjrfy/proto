@@ -38,6 +38,12 @@ class EprocMGAdapter(BaseAdapter):
     SEL_2FA_CODIGO = "#txtAcessoCodigo"
     SEL_2FA_BTN = "#btnValidar"
     TXT_PAINEL = "Painel do Advogado"
+    # ---- captcha de login (InfraCaptcha, adicionado pelo TJMG em jun/2026) ----
+    SEL_CAPTCHA_INPUT = "#txtInfraCaptcha"
+    SEL_CAPTCHA_AUDIO_BTN = "#infraImgAudioCaptcha"
+    SEL_CAPTCHA_ENVIAR = 'button[value="Enviar"]'
+    URL_CAPTCHA_AUDIO = "/infra_js/infra_gerar_audio_captcha.php"
+    CAPTCHA_MAX_TENTATIVAS = 6
 
     # ---- seletores: consulta processual ----
     SEL_MENU_CONSULTA = 'a[aria-label="Consulta Processual"]'
@@ -79,6 +85,10 @@ class EprocMGAdapter(BaseAdapter):
         self.page.fill(self.SEL_SENHA, senha)
         self.page.click(self.SEL_SUBMIT)
 
+        # eproc-MG passou a exigir captcha no login (jun/2026). Se a tela de
+        # captcha aparecer, resolve via áudio (STT) antes de esperar o 2FA.
+        self._resolver_captcha_se_necessario()
+
         estado = self._aguardar_pos_submit(timeout_s=self.settings.login_timeout)
 
         if estado == "2fa":
@@ -100,6 +110,59 @@ class EprocMGAdapter(BaseAdapter):
         return {"estado": estado, "cookies": jar.cookies}
 
     # ---- internos ----
+    def _captcha_presente(self) -> bool:
+        assert self.page is not None
+        try:
+            loc = self.page.locator(self.SEL_CAPTCHA_INPUT)
+            return loc.count() > 0 and loc.is_visible()
+        except Exception:
+            return False
+
+    def _resolver_captcha_se_necessario(self) -> None:
+        """Se a tela de captcha do eproc aparecer após o submit, resolve via
+        áudio (STT) num retry-loop — cada submit errado regenera o captcha.
+
+        No-op se não houver captcha. Levanta EprocLoginError se não resolver
+        em CAPTCHA_MAX_TENTATIVAS.
+        """
+        assert self.page is not None
+        self.page.wait_for_timeout(1500)  # deixa a tela de captcha montar
+        if not self._captcha_presente():
+            return  # sem captcha — fluxo antigo
+
+        from ...captcha_audio import transcrever_codigo
+
+        base = self.LOGIN_URL.rstrip("/")
+        for tentativa in range(1, self.CAPTCHA_MAX_TENTATIVAS + 1):
+            try:
+                # dispara a geração do áudio e baixa o WAV (mesma sessão = mesmo código)
+                self.page.locator(self.SEL_CAPTCHA_AUDIO_BTN).click()
+                self.page.wait_for_timeout(1200)
+                resp = self.context.request.get(f"{base}{self.URL_CAPTCHA_AUDIO}")
+                codigo = transcrever_codigo(resp.body())
+            except Exception as e:
+                self.log.warning("captcha tentativa %d: erro baixando/transcrevendo áudio: %s",
+                                  tentativa, e)
+                codigo = ""
+
+            if not codigo:
+                self.log.info("captcha tentativa %d: transcrição vazia — regenerando", tentativa)
+                continue
+
+            self.page.fill(self.SEL_CAPTCHA_INPUT, codigo)
+            self.page.locator(self.SEL_CAPTCHA_ENVIAR).first.click()
+            self.page.wait_for_timeout(4000)
+
+            if not self._captcha_presente():
+                self.log.info("captcha resolvido na tentativa %d (código=%r)", tentativa, codigo)
+                return
+            self.log.info("captcha tentativa %d falhou (código=%r) — nova tentativa",
+                          tentativa, codigo)
+
+        raise EprocLoginError(
+            f"captcha de áudio não resolvido em {self.CAPTCHA_MAX_TENTATIVAS} tentativas."
+        )
+
     def _aguardar_pos_submit(self, timeout_s: int) -> str | None:
         """Retorna '2fa', 'painel' ou None."""
         assert self.page is not None
