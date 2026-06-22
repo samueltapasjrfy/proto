@@ -68,6 +68,24 @@ EPROC_BASE_TO_TRIBUNAL = {
     "https://eproc1g.tjrj.jus.br/eproc/": "eproc_rj",
 }
 
+# Código do tribunal no CNJ (dígitos 14-16 dos 20 = posição [-7:-4]) → tribunal_id.
+# Usado pra rotear uma consulta avulsa pro eproc CERTO a partir do número.
+CNJ_TRIBUNAL = {"813": "eproc_mg", "821": "eproc_rs", "826": "eproc_sp", "819": "eproc_rj"}
+
+# Fábricas de credenciais por tribunal (cada eproc tem usuário/senha próprios no .env).
+ENV_STORE_FACTORIES = {
+    "eproc_mg": EnvClienteStore.from_env_eproc_mg,
+    "eproc_rs": EnvClienteStore.from_env_eproc_rs,
+    "eproc_sp": EnvClienteStore.from_env_eproc_sp,
+    "eproc_rj": EnvClienteStore.from_env_eproc_rj,
+}
+
+
+def _tribunal_por_cnj(numero: str) -> str | None:
+    """Detecta o tribunal pelo código no CNJ (20 dígitos). None se não bater."""
+    d = re.sub(r"\D", "", numero or "")
+    return CNJ_TRIBUNAL.get(d[-7:-4]) if len(d) == 20 else None
+
 
 def _default_desde(dias: int = 7) -> str:
     """Default da janela: últimos N dias (não mais que isso, pra não puxar lixo)."""
@@ -142,7 +160,15 @@ def cmd_consultar(args: argparse.Namespace) -> int:
     settings, cookie_store = _bootstrap_base()
     log = get_logger("cli")
     try:
-        adapter_cls, cliente, cliente_store = _abrir_adapter(args, settings, cookie_store, log)
+        # Sem --cliente, roteia pro eproc do tribunal do CNJ (não force MG sempre).
+        trib = _tribunal_por_cnj(args.numero) if getattr(args, "cliente", None) is None else None
+        if trib:
+            adapter_cls = ADAPTERS[trib]
+            cliente_store = ENV_STORE_FACTORIES[trib]()
+            cliente = cliente_store.get(ENV_CLIENTE_ID)
+            log.info("consulta roteada pelo CNJ → %s", trib)
+        else:
+            adapter_cls, cliente, cliente_store = _abrir_adapter(args, settings, cookie_store, log)
     except (RuntimeError, KeyError) as e:
         log.error(str(e))
         return 1
