@@ -383,6 +383,16 @@ def cmd_peticionar(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pasta_item(cnj_digits: str, cod_item: int) -> Path:
+    """Pasta de trabalho ISOLADA por CodItem (documentos + recibo).
+
+    Cada CodItem é um protocolo distinto — nunca pode reaproveitar arquivos de
+    outro CodItem, mesmo do MESMO processo (mesmo IdProc/CNJ). Por isso a pasta
+    inclui o CodItem, não só o CNJ. Mantém o CNJ no nome pra leitura humana.
+    """
+    return Path.cwd() / f"{cnj_digits}_{cod_item}"
+
+
 def _preparar_item(cod_item: int, args, log) -> dict | None:
     """Fase de preparação (sem browser): consulta DB, baixa S3, identifica principal.
 
@@ -417,7 +427,12 @@ def _preparar_item(cod_item: int, args, log) -> dict | None:
         log.error("CodItem=%s: eproc_base %r sem adapter registrado", cod_item, eproc_base)
         return None
 
-    pasta = Path.cwd() / cnj_digits
+    # Pasta de trabalho POR CodItem (não por CNJ): cada CodItem é um protocolo
+    # distinto, com documentos próprios. Compartilhar a pasta por CNJ fazia o 2º
+    # protocolo do mesmo processo reusar documentos E recibo do 1º (s3_baixar tem
+    # pular_se_existir=True; o recibo é recibo<CNJ>.pdf). Isolar por CodItem
+    # garante que isso nunca mais aconteça.
+    pasta = _pasta_item(cnj_digits, cod_item)
     pasta.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -563,7 +578,7 @@ def _finalizar_sucessos(sucessos, log) -> tuple[list, list]:
     for cod, cnj, recibo in pendentes:
         try:
             resultado = upload_recibo_painel(
-                recibo_path=recibo, cod_item=cod, nome_arquivo_painel=f"recibo-{cnj}.pdf",
+                recibo_path=recibo, cod_item=cod, nome_arquivo_painel=f"recibo-{cnj}-{cod}.pdf",
             )
             if resultado.get("ja_concluido"):
                 log.info("CodItem=%s: painel já estava em status concluído — nada feito", cod)
@@ -1078,17 +1093,22 @@ def cmd_finalizar(args: argparse.Namespace) -> int:
             if args.recibo:
                 recibo_path = Path(args.recibo).expanduser().resolve()
             else:
-                recibo_path = Path.cwd() / cnj / f"recibo{cnj}.pdf"
+                # Recibo na pasta ISOLADA do CodItem (./<CNJ>_<CodItem>/). NUNCA
+                # cair no recibo<CNJ>.pdf compartilhado — itens diferentes do mesmo
+                # processo têm recibos diferentes. Se o recibo deste CodItem não
+                # existe, FALHA (não finaliza com recibo de outro item).
+                recibo_path = _pasta_item(cnj, cod) / f"recibo{cnj}.pdf"
 
             if not recibo_path.exists():
-                log.error("CodItem=%s: recibo não encontrado em %s", cod, recibo_path)
-                falhas.append((cod, f"recibo ausente: {recibo_path.name}"))
+                log.error("CodItem=%s: recibo não encontrado em %s — NÃO finaliza "
+                          "(cada CodItem precisa do PRÓPRIO recibo).", cod, recibo_path)
+                falhas.append((cod, f"recibo ausente: {recibo_path}"))
                 continue
 
             resultado = upload_recibo_painel(
                 recibo_path=recibo_path,
                 cod_item=cod,
-                nome_arquivo_painel=f"recibo-{cnj}.pdf",
+                nome_arquivo_painel=f"recibo-{cnj}-{cod}.pdf",
             )
             if resultado.get("ja_concluido"):
                 log.info("CodItem=%s: painel já estava concluído — nada feito", cod)
