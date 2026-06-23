@@ -38,10 +38,32 @@ def _config_db() -> dict[str, Any]:
     }
 
 
+def _conectar_com_retry(tentativas: int = 5, backoff_s: float = 1.5):
+    """Abre a conexão MySQL com retry — a RDS às vezes recusa conexões
+    transitoriamente (limite de conexões / throttling sob carga). Backoff
+    exponencial. Configurável via RPA_DB_RETRIES."""
+    import time as _t
+    tentativas = int(os.getenv("RPA_DB_RETRIES", str(tentativas)))
+    cfg = _config_db()
+    ultimo: Exception | None = None
+    for i in range(1, tentativas + 1):
+        try:
+            return pymysql.connect(**cfg)
+        except pymysql.err.OperationalError as e:
+            # 2003 = can't connect (refused/timeout) — transitório, vale retry.
+            if e.args and e.args[0] == 2003 and i < tentativas:
+                ultimo = e
+                _t.sleep(backoff_s * i)
+                continue
+            raise
+    assert ultimo is not None
+    raise ultimo
+
+
 @contextmanager
 def conexao() -> Iterator[pymysql.connections.Connection]:
-    """Context manager que abre e fecha a conexão MySQL."""
-    conn = pymysql.connect(**_config_db())
+    """Context manager que abre e fecha a conexão MySQL (com retry transitório)."""
+    conn = _conectar_com_retry()
     try:
         yield conn
     finally:
