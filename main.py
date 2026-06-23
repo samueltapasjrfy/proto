@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import random
 import re
 import sys
@@ -549,6 +550,36 @@ def _preparar_item(cod_item: int, args, log) -> dict | None:
     }
 
 
+def _finalizar_sucessos(sucessos, log) -> tuple[list, list]:
+    """Fase 3: sobe o recibo no painel Jurify + marca concluído, pra cada sucesso
+    que tem recibo. Retorna (finalizados, falhas_finalizacao). Idempotente: se o
+    item já está concluído, o upload_recibo_painel não refaz nada.
+    """
+    finalizados: list[tuple[int, dict]] = []
+    falhas_finalizacao: list[tuple[int, str]] = []
+    pendentes = [(c, cnj, r) for c, cnj, r in sucessos if r is not None]
+    if pendentes:
+        log.info("FASE 3 — finalizando %d item(ns) no painel Jurify", len(pendentes))
+    for cod, cnj, recibo in pendentes:
+        try:
+            resultado = upload_recibo_painel(
+                recibo_path=recibo, cod_item=cod, nome_arquivo_painel=f"recibo-{cnj}.pdf",
+            )
+            if resultado.get("ja_concluido"):
+                log.info("CodItem=%s: painel já estava em status concluído — nada feito", cod)
+            else:
+                log.info("CodItem=%s: painel atualizado — CodArquivo=%s s3://%s/%s",
+                         cod, resultado["cod_arqv"], resultado["bucket"], resultado["keyfile"])
+            finalizados.append((cod, resultado))
+        except JurifyError as e:
+            log.error("CodItem=%s: falha finalizando painel — %s", cod, e)
+            falhas_finalizacao.append((cod, str(e)))
+        except Exception as e:
+            log.exception("CodItem=%s: erro inesperado finalizando painel", cod)
+            falhas_finalizacao.append((cod, f"{type(e).__name__}: {e}"))
+    return finalizados, falhas_finalizacao
+
+
 def cmd_processar(args: argparse.Namespace) -> int:
     """Processa em lote uma lista de CodItems: DB → S3 → eproc.
 
@@ -604,10 +635,24 @@ def cmd_processar(args: argparse.Namespace) -> int:
     sucessos: list[tuple[int, str, Path | None]] = []
     falhas: list[tuple[int, str]] = []
 
+    # Fase 3 (finalização no Jurify) — acumuladores. No caminho paralelo a Fase 3
+    # roda INCREMENTALMENTE (cada tribunal finaliza assim que seu subprocesso
+    # retorna), pra que um subprocesso travado não bloqueie a finalização dos
+    # outros. No serial, roda no fim.
+    finalizados: list[tuple[int, dict]] = []
+    falhas_finalizacao: list[tuple[int, str]] = []
+    fase3_ativa = bool(args.finalizar and args.peticionar)
+
     if args.parallel_tribunais and len(por_tribunal) > 1:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutTimeout, as_completed
         log.info("paralelizando %d tribunal(is) em processos separados",
                  len(por_tribunal))
+        # Timeout escalonado pelo maior grupo: lotes grandes têm mais tempo;
+        # um subprocesso travado num lote pequeno é abandonado rápido (os recibos
+        # já estão salvos → recuperável com `finalizar`). Override: RPA_PARALLEL_TIMEOUT_S.
+        maior = max(len(v) for v in por_tribunal.values())
+        timeout_s = int(os.getenv("RPA_PARALLEL_TIMEOUT_S", str(600 + 120 * maior)))
+        log.info("timeout por aguardo de subprocesso: %ds (maior grupo=%d itens)", timeout_s, maior)
         # `vars(args)` é pickle-safe (só primitivos do argparse).
         args_dict = vars(args)
         with ProcessPoolExecutor(max_workers=len(por_tribunal)) as exe:
@@ -615,55 +660,46 @@ def cmd_processar(args: argparse.Namespace) -> int:
                 exe.submit(_executar_grupo_em_processo, tid, itens, args_dict): tid
                 for tid, itens in por_tribunal.items()
             }
-            for fut in as_completed(futures):
-                tid = futures[fut]
-                try:
-                    s, f = fut.result()
-                    sucessos.extend(s)
-                    falhas.extend(f)
-                except Exception as e:
-                    log.exception("processo do tribunal %s falhou: %s", tid, e)
+            pendentes = set(futures)
+            try:
+                for fut in as_completed(futures, timeout=timeout_s):
+                    pendentes.discard(fut)
+                    tid = futures[fut]
+                    try:
+                        s, f = fut.result()
+                        sucessos.extend(s)
+                        falhas.extend(f)
+                        # Fase 3 incremental: finaliza JÁ os itens deste tribunal.
+                        if fase3_ativa:
+                            fin, ff = _finalizar_sucessos(s, log)
+                            finalizados.extend(fin)
+                            falhas_finalizacao.extend(ff)
+                    except Exception as e:
+                        log.exception("processo do tribunal %s falhou: %s", tid, e)
+                        falhas.extend(
+                            (it["cod_item"], f"processo do tribunal {tid} falhou: {e}")
+                            for it in por_tribunal[tid]
+                        )
+            except FutTimeout:
+                # Um ou mais subprocessos travaram. Abandona — seus recibos já
+                # estão salvos localmente e dá pra recuperar com `main.py finalizar`.
+                travados = [futures[f] for f in pendentes]
+                log.error("TIMEOUT (%ds): subprocesso(s) travado(s): %s — abandonando. "
+                          "Itens recuperáveis via `finalizar` (recibos já salvos).",
+                          timeout_s, travados)
+                for f in pendentes:
+                    f.cancel()
                     falhas.extend(
-                        (it["cod_item"], f"processo do tribunal {tid} falhou: {e}")
-                        for it in por_tribunal[tid]
+                        (it["cod_item"], f"subprocesso {futures[f]} travado (timeout {timeout_s}s)")
+                        for it in por_tribunal[futures[f]]
                     )
     else:
         for tribunal_id, itens in por_tribunal.items():
             s, f = _executar_grupo(tribunal_id, itens, args, settings, cookie_store, log)
             sucessos.extend(s)
             falhas.extend(f)
-
-    # ---- Fase 3: subir recibo no painel Jurify + concluir item ----
-    finalizados: list[tuple[int, dict]] = []
-    falhas_finalizacao: list[tuple[int, str]] = []
-    if args.finalizar and args.peticionar:
-        log.info("=" * 64)
-        log.info("FASE 3 — finalizando %d item(ns) no painel Jurify",
-                 sum(1 for _, _, r in sucessos if r is not None))
-        log.info("=" * 64)
-        for cod, cnj, recibo in sucessos:
-            if recibo is None:
-                continue
-            try:
-                resultado = upload_recibo_painel(
-                    recibo_path=recibo,
-                    cod_item=cod,
-                    nome_arquivo_painel=f"recibo-{cnj}.pdf",
-                )
-                if resultado.get("ja_concluido"):
-                    log.info("CodItem=%s: painel já estava em status concluído — nada feito", cod)
-                else:
-                    log.info(
-                        "CodItem=%s: painel atualizado — CodArquivo=%s s3://%s/%s",
-                        cod, resultado["cod_arqv"], resultado["bucket"], resultado["keyfile"],
-                    )
-                finalizados.append((cod, resultado))
-            except JurifyError as e:
-                log.error("CodItem=%s: falha finalizando painel — %s", cod, e)
-                falhas_finalizacao.append((cod, str(e)))
-            except Exception as e:
-                log.exception("CodItem=%s: erro inesperado finalizando painel", cod)
-                falhas_finalizacao.append((cod, f"{type(e).__name__}: {e}"))
+        if fase3_ativa:
+            finalizados, falhas_finalizacao = _finalizar_sucessos(sucessos, log)
 
     # Devolve pro pool (status 10) tudo que falhou em Fase 2 ou Fase 3 —
     # próxima rodada pega de novo. Sucesso da Fase 3 já move pra 9 via SP.
