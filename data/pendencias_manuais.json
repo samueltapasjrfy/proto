@@ -126,7 +126,8 @@
     1610895,
     1611875,
     1611986,
-    1612272
+    1612272,
+    1613056
   ],
   "cnj_ausente_no_pdf": [
     1610674
@@ -140,5 +141,8 @@
   ],
   "peticionar_bloqueado": [
     1611986
+  ],
+  "peticionar_nao_confirmado": [
+    1613056
   ]
 }
