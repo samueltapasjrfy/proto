@@ -8,7 +8,7 @@
 # - NÃO mexe em status 11 (não reseta falhas) pra nunca colidir com run em voo.
 
 set -u
-DIA_TESTE="2026-06-30"
+DIA_TESTE="2026-07-01"
 REPO="/Users/samuelferreira/Documents/rpa-protocolo"
 LOGDIR="$REPO/data/auto_logs"
 LOCKDIR="/tmp/rpa_auto.lockdir"
