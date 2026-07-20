@@ -8,7 +8,7 @@
 #  - check_novos/migrados_pendentes só pegam status 1/10 (em execução/concluído ficam fora)
 
 set -u
-DIA_TESTE="2026-07-07"
+DIA_TESTE="2026-07-20"
 REPO="/Users/samuelferreira/Documents/rpa-protocolo"
 LOGDIR="$REPO/data/auto_logs"
 LOCKDIR="/tmp/rpa_auto.lockdir"
@@ -31,6 +31,9 @@ fi
 cd "$REPO" || { echo "$(date '+%F %T') ERRO cd repo" >> "$AUDIT"; exit 1; }
 TS=$(date +%H%M%S)
 
+CIC_DISP=0   # total disponíveis p/ protocolar no ciclo (novos + migrados)
+CIC_PROT=0   # total realmente protocolados no eproc
+
 run_lote() {  # $1=arquivo-de-ids  $2=workers  $3=label
   local ids; ids=$(cat "$1" 2>/dev/null)
   if [ -z "${ids// }" ]; then echo "$(date '+%F %T') $3: nada a rodar" >> "$AUDIT"; return; fi
@@ -39,8 +42,11 @@ run_lote() {  # $1=arquivo-de-ids  $2=workers  $3=label
   echo "$(date '+%F %T') $3: rodando $n -> $ids" >> "$AUDIT"
   python3 main.py processar $ids --ignorar-filtro-migracao --peticionar \
     --workers "$2" --parallel-tribunais >> "$log" 2>&1
+  local prot; prot=$(grep -c 'CNJ ' "$log" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+  prot=$(grep -cE '→ CNJ' "$log" 2>/dev/null || echo 0)
   local ok; ok=$(grep -c 'marcado como CONCLUÍDO' "$log" 2>/dev/null || echo 0)
-  echo "$(date '+%F %T') $3: fim — $n enviados, $ok finalizados (log: $log)" >> "$AUDIT"
+  CIC_DISP=$((CIC_DISP + n)); CIC_PROT=$((CIC_PROT + prot))
+  echo "$(date '+%F %T') $3: fim — $n disponíveis, $prot protocolados, $ok finalizados (log: $log)" >> "$AUDIT"
 }
 
 # ================= FASE NOVOS =================
@@ -64,4 +70,5 @@ else
   echo "$(date '+%F %T') migrados: ERRO no cross-ref — pulando fase" >> "$AUDIT"
 fi
 
+echo "$(date '+%F %T') 📊 CICLO RESUMO — disponíveis p/ protocolar: $CIC_DISP | realmente protocolados: $CIC_PROT" >> "$AUDIT"
 echo "$(date '+%F %T') ciclo completo" >> "$AUDIT"
