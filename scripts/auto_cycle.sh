@@ -70,5 +70,6 @@ else
   echo "$(date '+%F %T') migrados: ERRO no cross-ref — pulando fase" >> "$AUDIT"
 fi
 
-echo "$(date '+%F %T') 📊 CICLO RESUMO — disponíveis p/ protocolar: $CIC_DISP | realmente protocolados: $CIC_PROT" >> "$AUDIT"
+UFREP=$(PYTHONPATH=. python3 scripts/cycle_report.py "$LOGDIR/novos_${HOJE}_${TS}.log" "$LOGDIR/migrados_${HOJE}_${TS}.log" 2>/dev/null)
+echo "$(date '+%F %T') 📊 CICLO RESUMO — disponíveis p/ protocolar: $CIC_DISP | realmente protocolados: $CIC_PROT | $UFREP" >> "$AUDIT"
 echo "$(date '+%F %T') ciclo completo" >> "$AUDIT"
