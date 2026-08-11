@@ -1,15 +1,18 @@
 """Automação eproc-RJ.
 
-Híbrido entre MG e RS/SP:
-- Login *direto* no eproc (sem Keycloak SSO), com IDs idênticos ao MG
-  (`#txtUsuario`, `#pwdSenha`, `#sbmEntrar`, `#txtAcessoCodigo`, `#btnValidar`).
-  A página inicial `/eproc/` é pública; o form vive em `externo_controlador.php?acao=principal`.
+Mesma estrutura de RS/SP:
+- Login via Keycloak SSO (`eproc-sso.tjrj.jus.br/realms/eproc`), form com
+  IDs `#username`/`#password`/`#kc-login` e 2FA em `#otp` — tudo herdado do
+  `EprocRSAdapter`. A URL de entrada `externo_controlador.php?acao=principal`
+  redireciona pro SSO.
+  ATÉ AGO/2026 o RJ usava o form direto do eproc (`#txtUsuario`/`#pwdSenha`,
+  IDs do MG). O TJRJ migrou pro Keycloak e esses campos viraram `type=hidden`
+  no DOM — continuavam existindo, mas invisíveis, então o `Page.fill` ficava
+  30s esperando visibilidade e estourava ("login RJ falhou: Page.fill Timeout").
+  Se o login do RJ voltar a quebrar, cheque primeiro se os IDs do form mudaram.
 - Pós-2FA cai em uma tela 'Seleção de perfil' (igual RS/SP) — precisa
   escolher um perfil RJ antes de chegar no painel. Toda a lógica de
   seleção de perfil vem do `EprocRSAdapter`.
-
-Pra evitar duplicação, herdamos de `EprocRSAdapter` e sobrescrevemos os
-seletores Keycloak voltando-os pros do MG/SIP do próprio eproc.
 
 Modo stealth (env `RPA_RJ_STEALTH=1`): usa `patchright` em vez de `playwright`
 puro pra evitar detecção do Cloudflare Turnstile, que o TJRJ adicionou no
@@ -19,7 +22,6 @@ from __future__ import annotations
 
 import os
 
-from ..eproc_mg.adapter import EprocMGAdapter
 from ..eproc_rs.adapter import EprocRSAdapter
 
 
@@ -27,12 +29,8 @@ class EprocRJAdapter(EprocRSAdapter):
     TRIBUNAL_ID = "eproc_rj"
     LOGIN_URL = "https://eproc1g.tjrj.jus.br/eproc/externo_controlador.php?acao=principal"
 
-    # Sem Keycloak — IDs do form de login são os mesmos do MG.
-    SEL_USUARIO = EprocMGAdapter.SEL_USUARIO
-    SEL_SENHA = EprocMGAdapter.SEL_SENHA
-    SEL_SUBMIT = EprocMGAdapter.SEL_SUBMIT
-    SEL_2FA_CODIGO = EprocMGAdapter.SEL_2FA_CODIGO
-    SEL_2FA_BTN = EprocMGAdapter.SEL_2FA_BTN
+    # Login é Keycloak (#username/#password/#kc-login) e 2FA em #otp — herdamos
+    # de EprocRSAdapter sem sobrescrever nada.
 
     # Sigla RJ (ex.: RJ123456A). Configurável via `RPA_EPROC_RJ_PERFIL_REGEX`.
     PERFIL_REGEX_DEFAULT = r"^RJ\w+"
