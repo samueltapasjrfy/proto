@@ -8,7 +8,7 @@
 #  - check_novos/migrados_pendentes só pegam status 1/10 (em execução/concluído ficam fora)
 
 set -u
-DIA_TESTE="2026-08-24"
+DIA_TESTE="2026-08-25"
 REPO="/Users/samuelferreira/Documents/rpa-protocolo"
 LOGDIR="$REPO/data/auto_logs"
 LOCKDIR="/tmp/rpa_auto.lockdir"
