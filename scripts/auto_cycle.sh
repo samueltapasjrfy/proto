@@ -50,7 +50,7 @@ MAX_LOTE="${RPA_MAX_LOTE:-40}"
 # Workers adaptativos: esta maquina roda outro robo Playwright em paralelo.
 # Com o load ja alto, abrir 3 browsers por tribunal so aumenta a fila de CPU e
 # faz o login estourar timeout. Acima de 75% dos cores, cai pra 2.
-CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 8)
+CORES=$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 8)
 LOAD1=$(uptime | sed 's/.*averages*: //' | awk '{print int($1)}')
 if [ "$LOAD1" -ge $((CORES * 3 / 4)) ]; then WK=2; else WK=3; fi
 echo "$(date '+%F %T') load=$LOAD1/$CORES -> workers=$WK" >> "$AUDIT"
