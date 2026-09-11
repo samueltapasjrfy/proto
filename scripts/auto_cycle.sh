@@ -34,10 +34,24 @@ TS=$(date +%H%M%S)
 CIC_DISP=0   # total disponíveis p/ protocolar no ciclo (novos + migrados)
 CIC_PROT=0   # total realmente protocolados no eproc
 
+# Teto de itens por ciclo. Lote grande satura a maquina (cada item abre
+# browser; com ~150+ o load passa de 15, o Chromium nao renderiza a tempo e o
+# login estoura o timeout de 25s -> "nenhum login funcionou" em massa). Isso
+# vira bola de neve: nada protocola, a fila cresce, o lote seguinte e maior.
+# Aconteceu em 10-11/set/2026: 12 ciclos seguidos com 0 protocolados e fila
+# subindo de 183 para 237. Com teto, a fila drena em varios ciclos menores.
+MAX_LOTE="${RPA_MAX_LOTE:-40}"
+
 run_lote() {  # $1=arquivo-de-ids  $2=workers  $3=label
-  local ids; ids=$(cat "$1" 2>/dev/null)
-  if [ -z "${ids// }" ]; then echo "$(date '+%F %T') $3: nada a rodar" >> "$AUDIT"; return; fi
+  local todos; todos=$(cat "$1" 2>/dev/null)
+  if [ -z "${todos// }" ]; then echo "$(date '+%F %T') $3: nada a rodar" >> "$AUDIT"; return; fi
+  local total; total=$(echo $todos | wc -w | tr -d ' ')
+  # corta no teto; o resto fica pro proximo ciclo (nunca some silenciosamente)
+  local ids; ids=$(echo $todos | tr ' ' '\n' | head -n "$MAX_LOTE" | tr '\n' ' ')
   local n; n=$(echo $ids | wc -w | tr -d ' ')
+  if [ "$total" -gt "$n" ]; then
+    echo "$(date '+%F %T') $3: fila tem $total, rodando $n (teto $MAX_LOTE) — $((total - n)) ficam pro proximo ciclo" >> "$AUDIT"
+  fi
   local log="$LOGDIR/${3}_${HOJE}_${TS}.log"
   echo "$(date '+%F %T') $3: rodando $n -> $ids" >> "$AUDIT"
   python3 main.py processar $ids --ignorar-filtro-migracao --peticionar \
