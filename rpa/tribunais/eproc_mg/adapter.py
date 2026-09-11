@@ -19,6 +19,17 @@ class EprocLoginError(RuntimeError):
     pass
 
 
+class EprocCredencialInvalida(EprocLoginError):
+    """O tribunal rejeitou usuário/senha.
+
+    Diferente de um timeout: repetir com a MESMA credencial não vai funcionar,
+    então quem chama deve abortar o grupo inteiro em vez de gastar 25s por
+    sessão. Em 09-11/set/2026 MG, RS e SP ficaram 2 dias devolvendo isso e o
+    robô reportava "Não foi possível detectar 2FA nem painel em 25s", o que
+    escondeu a causa real (senha inválida no tribunal).
+    """
+
+
 class EprocConsultaError(RuntimeError):
     pass
 
@@ -167,6 +178,55 @@ class EprocMGAdapter(BaseAdapter):
             f"captcha de áudio não resolvido em {self.CAPTCHA_MAX_TENTATIVAS} tentativas."
         )
 
+    # Textos que significam "credencial rejeitada". O eproc puro (MG) devolve na
+    # querystring (?msg=Senha ou usuário Inválidos, percent-encoded em latin-1);
+    # o Keycloak (RS/SP/RJ) renderiza em #input-error/.kc-feedback-text.
+    _PADROES_CREDENCIAL_INVALIDA = (
+        "senha ou usuario invalidos",
+        "nome de usuario ou senha invalida",
+        "usuario ou senha invalidos",
+        "invalid username or password",
+        "credenciais invalidas",
+    )
+
+    @staticmethod
+    def _normalizar(txt: str) -> str:
+        import unicodedata
+        sem_acento = unicodedata.normalize("NFKD", txt or "")
+        return "".join(c for c in sem_acento if not unicodedata.combining(c)).lower()
+
+    def _erro_credencial(self) -> str | None:
+        """Retorna o texto do erro se o tribunal já rejeitou a credencial."""
+        if self.page is None:
+            return None
+        from urllib.parse import unquote
+        try:
+            # %E1 etc. vêm em latin-1 no eproc — unquote utf-8 estouraria.
+            url = self._normalizar(unquote(self.page.url, encoding="latin-1", errors="replace"))
+            for pat in self._PADROES_CREDENCIAL_INVALIDA:
+                if pat in url:
+                    return pat
+            textos = self.page.eval_on_selector_all(
+                "#input-error, .kc-feedback-text, [role=alert], .alert-error",
+                "els => els.map(e => e.innerText || '')",
+            )
+            for t in textos or []:
+                norm = self._normalizar(t)
+                for pat in self._PADROES_CREDENCIAL_INVALIDA:
+                    if pat in norm:
+                        return t.strip()
+        except Exception:
+            return None
+        return None
+
+    def _abortar_se_credencial_rejeitada(self) -> None:
+        erro = self._erro_credencial()
+        if erro:
+            raise EprocCredencialInvalida(
+                f"{self.TRIBUNAL_ID}: tribunal rejeitou a credencial ({erro!r}). "
+                f"Renove a senha em EPROC_{self.TRIBUNAL_ID.split('_')[-1].upper()}_SENHA."
+            )
+
     def _aguardar_pos_submit(self, timeout_s: int) -> str | None:
         """Retorna '2fa', 'painel' ou None."""
         assert self.page is not None
@@ -177,6 +237,9 @@ class EprocMGAdapter(BaseAdapter):
         # ainda não montou (visto em RJ). 3s cobre o caso na prática.
         delay_heuristica = 3.0
         while time.time() < fim:
+            # Fast-fail: se o tribunal já devolveu "senha inválida" não adianta
+            # esperar os 25s — aborta na hora com o motivo real.
+            self._abortar_se_credencial_rejeitada()
             if self._campo_2fa_visivel():
                 return "2fa"
             if self._painel_carregado():

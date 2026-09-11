@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 
+from ..eproc_mg.adapter import EprocCredencialInvalida
 from ..eproc_rs.adapter import EprocRSAdapter
 
 
@@ -78,6 +79,10 @@ class EprocRJAdapter(EprocRSAdapter):
         for tentativa in range(1, self.LOGIN_MAX_TENTATIVAS + 1):
             try:
                 return super().login()
+            except EprocCredencialInvalida:
+                # Senha rejeitada não é flake de rate-limit: insistir só queima
+                # tempo (e arrisca bloquear a conta). Sobe direto.
+                raise
             except Exception as e:
                 ultimo_erro = e
                 self._dump_login_fail()

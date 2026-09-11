@@ -42,9 +42,15 @@ from rpa.storage import ENV_CLIENTE_ID, ClienteStore, CookieStore, EnvClienteSto
 
 # Registro de adapters por tribunal — adicione aqui ao implementar novos tribunais.
 from rpa.tribunais.eproc_mg import EprocMGAdapter, EprocMGAsyncFlow
+from rpa.tribunais.eproc_mg.adapter import EprocCredencialInvalida
 from rpa.tribunais.eproc_rj import EprocRJAdapter, EprocRJAsyncFlow
 from rpa.tribunais.eproc_rs import EprocRSAdapter, EprocRSAsyncFlow
 from rpa.tribunais.eproc_sp import EprocSPAdapter, EprocSPAsyncFlow
+
+# Tentativas por sessão de login. Login de tribunal é flaky (timeout de
+# rede, janela TOTP virando, lentidão do eproc); sem retry, uma única
+# falha derrubava o grupo inteiro em MG/RS, que usam 1 sessão compartilhada.
+LOGIN_MAX_TENTATIVAS = int(os.getenv("RPA_LOGIN_MAX_TENTATIVAS", "3"))
 
 ADAPTERS = {
     "eproc_mg": EprocMGAdapter,
@@ -880,6 +886,7 @@ def _processar_grupo_async(
         tribunal_id, n_logins, args.workers,
     )
     cookies_por_sessao: list[list] = []
+    cred_invalida: Exception | None = None
     for sid in range(n_logins):
         # Entre logins SP, aguarda a próxima janela TOTP — o Keycloak rejeita
         # o mesmo código se reutilizado, então não dá pra fazer N logins na
@@ -893,21 +900,49 @@ def _processar_grupo_async(
                 espera, sid + 1,
             )
             _t.sleep(espera)
-        try:
-            with adapter_cls(
-                cliente, settings=settings,
-                cliente_store=cliente_store, cookie_store=cookie_store,
-                headless=args.headless,
-            ) as login_adapter:
-                login_adapter.login()
-                cookies = login_adapter.context.cookies() if login_adapter.context else []
-                cookies_por_sessao.append(cookies)
-                log.info(
-                    "login sessão %d/%d OK — %d cookies",
-                    sid + 1, n_logins, len(cookies),
+        # Retry por sessão. Antes era tentativa única: em MG/RS (1 sessão
+        # compartilhada) um único login flaky derrubava o grupo inteiro —
+        # 19 itens RS perdidos por 1 timeout. Entre tentativas espera a
+        # próxima janela TOTP, senão o código é reusado e o Keycloak recusa.
+        for tentativa in range(1, LOGIN_MAX_TENTATIVAS + 1):
+            try:
+                with adapter_cls(
+                    cliente, settings=settings,
+                    cliente_store=cliente_store, cookie_store=cookie_store,
+                    headless=args.headless,
+                ) as login_adapter:
+                    login_adapter.login()
+                    cookies = login_adapter.context.cookies() if login_adapter.context else []
+                    cookies_por_sessao.append(cookies)
+                    log.info(
+                        "login sessão %d/%d OK — %d cookies",
+                        sid + 1, n_logins, len(cookies),
+                    )
+                break
+            except EprocCredencialInvalida as e:
+                # Senha rejeitada pelo tribunal: as outras sessões usariam a
+                # mesma credencial, então não há o que tentar. Aborta o grupo.
+                cred_invalida = e
+                log.error("login sessão %d: %s", sid + 1, e)
+                break
+            except Exception as e:
+                log.exception(
+                    "login sessão %d tentativa %d/%d falhou: %s",
+                    sid + 1, tentativa, LOGIN_MAX_TENTATIVAS, e,
                 )
-        except Exception as e:
-            log.exception("login sessão %d falhou: %s", sid + 1, e)
+                if tentativa < LOGIN_MAX_TENTATIVAS:
+                    import time as _t
+                    espera = 30 - (_t.time() % 30) + 1
+                    log.info("retry da sessão %d em %.1fs (próxima janela TOTP)", sid + 1, espera)
+                    _t.sleep(espera)
+        if cred_invalida is not None:
+            break
+
+    if cred_invalida is not None:
+        motivo = f"credencial rejeitada pelo tribunal: {cred_invalida}"
+        log.error("%s — pulando grupo (renove a senha no .env)", motivo)
+        falhas.extend((it["cod_item"], motivo) for it in itens)
+        return
 
     if not cookies_por_sessao:
         log.error("nenhum login bem-sucedido — pulando grupo")

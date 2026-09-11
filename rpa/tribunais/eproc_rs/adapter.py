@@ -108,6 +108,9 @@ class EprocRSAdapter(EprocMGAdapter):
         fim = inicio + timeout_s
         delay_heuristica = 3.0
         while _t.time() < fim:
+            # Mesmo fast-fail do MG: o Keycloak mostra "Nome de usuário ou senha
+            # inválida." em #input-error e fica nessa tela até o timeout.
+            self._abortar_se_credencial_rejeitada()
             if self._campo_2fa_visivel():
                 return "2fa"
             if self._painel_carregado():

@@ -29,6 +29,11 @@ if pgrep -f "main.py processar" >/dev/null 2>&1; then
   echo "$(date '+%F %T') skip — já há 'main.py processar' em execução" >> "$AUDIT"; exit 0
 fi
 cd "$REPO" || { echo "$(date '+%F %T') ERRO cd repo" >> "$AUDIT"; exit 1; }
+
+# Recolhe Chromes NOSSOS que ficaram orfaos de um ciclo anterior morto na marra.
+# NUNCA usar `pkill -f ms-playwright` aqui: o robo-pje-mg roda nesta maquina com
+# os browsers dele e seria morto junto (aconteceu em 11/set/2026).
+python3 scripts/chrome_gc.py orphans >> "$AUDIT" 2>&1
 TS=$(date +%H%M%S)
 
 CIC_DISP=0   # total disponíveis p/ protocolar no ciclo (novos + migrados)
@@ -41,6 +46,14 @@ CIC_PROT=0   # total realmente protocolados no eproc
 # Aconteceu em 10-11/set/2026: 12 ciclos seguidos com 0 protocolados e fila
 # subindo de 183 para 237. Com teto, a fila drena em varios ciclos menores.
 MAX_LOTE="${RPA_MAX_LOTE:-40}"
+
+# Workers adaptativos: esta maquina roda outro robo Playwright em paralelo.
+# Com o load ja alto, abrir 3 browsers por tribunal so aumenta a fila de CPU e
+# faz o login estourar timeout. Acima de 75% dos cores, cai pra 2.
+CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 8)
+LOAD1=$(uptime | sed 's/.*averages*: //' | awk '{print int($1)}')
+if [ "$LOAD1" -ge $((CORES * 3 / 4)) ]; then WK=2; else WK=3; fi
+echo "$(date '+%F %T') load=$LOAD1/$CORES -> workers=$WK" >> "$AUDIT"
 
 run_lote() {  # $1=arquivo-de-ids  $2=workers  $3=label
   local todos; todos=$(cat "$1" 2>/dev/null)
@@ -66,7 +79,7 @@ run_lote() {  # $1=arquivo-de-ids  $2=workers  $3=label
 # ================= FASE NOVOS =================
 rm -f /tmp/run_novos.txt
 if PYTHONPATH=. python3 scripts/check_novos.py > "$LOGDIR/novos_check_${TS}.txt" 2>&1; then
-  run_lote /tmp/run_novos.txt 3 novos
+  run_lote /tmp/run_novos.txt "$WK" novos
 else
   echo "$(date '+%F %T') novos: ERRO no check — pulando fase" >> "$AUDIT"
 fi
@@ -86,4 +99,5 @@ fi
 
 UFREP=$(PYTHONPATH=. python3 scripts/cycle_report.py "$LOGDIR/novos_${HOJE}_${TS}.log" "$LOGDIR/migrados_${HOJE}_${TS}.log" 2>/dev/null)
 echo "$(date '+%F %T') 📊 CICLO RESUMO — disponíveis p/ protocolar: $CIC_DISP | realmente protocolados: $CIC_PROT | $UFREP" >> "$AUDIT"
+python3 scripts/chrome_gc.py orphans >> "$AUDIT" 2>&1
 echo "$(date '+%F %T') ciclo completo" >> "$AUDIT"
