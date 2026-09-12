@@ -29,7 +29,19 @@ import sys
 # Perfil temporário do Playwright = nosso. Exige /var/folders (TMPDIR do macOS)
 # E o prefixo que o Playwright usa, pra não pegar temp de terceiros.
 NOSSO = re.compile(r"--user-data-dir=(/var/folders/\S*?playwright_\S*)")
-RUN_ATIVO = re.compile(r"Python\.app.*main\.py processar")
+# Um run de verdade é o binário python executando main.py processar. Casar o
+# texto solto dava falso positivo em QUALQUER processo cuja linha de comando
+# mencionasse o padrão — inclusive o shell que chama este script com um
+# `pgrep -f "Python.app.*main.py processar"` dentro. Isso fazia o modo `all`
+# recusar pra sempre.
+def _e_run_ativo(cmd: str) -> bool:
+    toks = cmd.split()
+    if not toks:
+        return False
+    exe = toks[0].rsplit("/", 1)[-1].lower()
+    if "python" not in exe:
+        return False
+    return any(t.endswith("main.py") for t in toks[1:]) and "processar" in toks[1:]
 
 
 def _ps() -> list[tuple[int, int, str]]:
@@ -78,7 +90,15 @@ def main() -> int:
     procs = _ps()
     vivos = {p for p, _, _ in procs}
     nossos, outros = classificar(procs)
-    run_ativo = any(RUN_ATIVO.search(c) for _, _, c in procs)
+    meu, ancestrais = os.getpid(), set()
+    pai = {pid: ppid for pid, ppid, _ in procs}
+    atual = meu
+    while atual in pai and atual > 1:
+        ancestrais.add(atual)
+        atual = pai[atual]
+    run_ativo = any(
+        _e_run_ativo(c) and p not in ancestrais for p, _, c in procs
+    )
 
     if modo == "list":
         print(f"nossos={len(nossos)} outro_robo={outros} "
