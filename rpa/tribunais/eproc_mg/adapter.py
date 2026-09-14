@@ -30,6 +30,17 @@ class EprocCredencialInvalida(EprocLoginError):
     """
 
 
+class EprocTrocaSenhaExigida(EprocCredencialInvalida):
+    """O eproc aceitou o login mas exige troca de senha antes de liberar o painel.
+
+    Em 13-14/set/2026 o RJ ficou quase um dia assim: o robô caía em
+    `controlador.php?acao=senha_alterar&exigirTroca=...`, não reconhecia a tela
+    e estourava timeout procurando o campo de usuário (106 vezes). Herda de
+    EprocCredencialInvalida pra quem chama abortar o grupo sem retry — trocar a
+    senha é ação humana.
+    """
+
+
 class EprocConsultaError(RuntimeError):
     pass
 
@@ -92,6 +103,7 @@ class EprocMGAdapter(BaseAdapter):
 
         self.log.info("acessando %s", self.LOGIN_URL)
         self.page.goto(self.LOGIN_URL)
+        self._abortar_se_credencial_rejeitada()
         self.page.fill(self.SEL_USUARIO, usuario)
         self.page.fill(self.SEL_SENHA, senha)
         self.page.click(self.SEL_SUBMIT)
@@ -220,6 +232,16 @@ class EprocMGAdapter(BaseAdapter):
         return None
 
     def _abortar_se_credencial_rejeitada(self) -> None:
+        uf = self.TRIBUNAL_ID.split('_')[-1].upper()
+        try:
+            url = (self.page.url or "") if self.page else ""
+        except Exception:
+            url = ""
+        if "acao=senha_alterar" in url and "exigirtroca" in url.lower():
+            raise EprocTrocaSenhaExigida(
+                f"{self.TRIBUNAL_ID}: o tribunal exige TROCA DE SENHA antes de liberar o "
+                f"painel. Troque a senha no eproc e atualize EPROC_{uf}_SENHA."
+            )
         erro = self._erro_credencial()
         if erro:
             raise EprocCredencialInvalida(
@@ -359,6 +381,7 @@ class EprocMGAdapter(BaseAdapter):
         assert self.page is not None
         fim = time.time() + timeout_s
         while time.time() < fim:
+            self._abortar_se_credencial_rejeitada()
             msg = self._mensagem_erro_2fa()
             if msg:
                 return (self._classificar_erro_2fa(msg), msg)

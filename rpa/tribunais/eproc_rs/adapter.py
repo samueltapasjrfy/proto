@@ -49,6 +49,10 @@ class EprocRSAdapter(EprocMGAdapter):
     _PADROES_RETRY_KEYCLOAK = (
         "código de uso único inválido",
         "codigo de uso unico invalido",
+        # TJSP (set/2026): mesma rejeição com outro texto. Sem isso o robô não
+        # via o erro, esperava 20s e refazia o login inteiro (~45s por falha).
+        "código autenticador inválido",
+        "codigo autenticador invalido",
         "invalid otp",
         "invalid authenticator code",
     )
@@ -63,6 +67,7 @@ class EprocRSAdapter(EprocMGAdapter):
         # Procura textos de erro vermelhos típicos do Keycloak
         for pat in (
             "Código de uso único inválido",
+            "Código autenticador inválido",
             "Invalid OTP",
             "Authentication failed",
         ):
@@ -218,6 +223,7 @@ class EprocRSAdapter(EprocMGAdapter):
         # Aguarda painel carregar
         fim = _t.time() + 25
         while _t.time() < fim:
+            self._abortar_se_credencial_rejeitada()
             if self._painel_carregado():
                 self.log.info("perfil aceito — painel carregado")
                 return
