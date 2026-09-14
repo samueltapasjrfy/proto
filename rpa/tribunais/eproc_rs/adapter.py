@@ -49,10 +49,6 @@ class EprocRSAdapter(EprocMGAdapter):
     _PADROES_RETRY_KEYCLOAK = (
         "código de uso único inválido",
         "codigo de uso unico invalido",
-        # TJSP (set/2026): mesma rejeição com outro texto. Sem isso o robô não
-        # via o erro, esperava 20s e refazia o login inteiro (~45s por falha).
-        "código autenticador inválido",
-        "codigo autenticador invalido",
         "invalid otp",
         "invalid authenticator code",
     )
@@ -67,6 +63,14 @@ class EprocRSAdapter(EprocMGAdapter):
         # Procura textos de erro vermelhos típicos do Keycloak
         for pat in (
             "Código de uso único inválido",
+            # TJSP (set/2026). Só DETECTA — de propósito não entra em
+            # _PADROES_RETRY_KEYCLOAK. Sem detectar, o robô esperava 20s de
+            # timeout à toa. Mas re-tentar na mesma tela multiplicava os códigos
+            # enviados (até 3 por login x 3 retries por sessão), e a recusa em
+            # rajada no SP é compatível com lockout anti-força-bruta do Keycloak:
+            # mais tentativas = mais bloqueio. Classificado como 'rejeitado', o
+            # login falha na hora e o retry por sessão (main.py) espera a próxima
+            # janela TOTP — mesmo nº de códigos de antes, sem os 20s parados.
             "Código autenticador inválido",
             "Invalid OTP",
             "Authentication failed",
