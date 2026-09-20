@@ -35,3 +35,6 @@ data/migracao_*.json
 
 # Claude Code session state
 .claude/
+
+# Clone MG-only independente (tem git proprio) — nao versionar aqui
+/rpa-poc-eproc/
